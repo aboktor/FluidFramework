@@ -35,7 +35,7 @@ import {
 	persistedCacheValueVersion,
 } from "./contracts";
 import { getQueryString } from "./getQueryString";
-import { getUrlAndHeadersWithAuth } from "./getUrlAndHeadersWithAuth";
+import { getHeadersWithAuth } from "./getUrlAndHeadersWithAuth";
 import {
 	fetchAndParseAsJSONHelper,
 	fetchHelper,
@@ -68,7 +68,7 @@ export enum SnapshotFormatSupportType {
 /**
  * Fetches a snapshot from the server with a given version id.
  * @param snapshotUrl - snapshot url from where the odsp snapshot will be fetched
- * @param token - token used for authorization in the request
+ * @param authHeader - token used for authorization in the request
  * @param storageFetchWrapper - Implementation of the get/post methods used to fetch the snapshot
  * @param versionId - id of specific snapshot to be fetched
  * @param fetchFullSnapshot - whether we want to fetch full snapshot(with blobs)
@@ -78,7 +78,7 @@ export enum SnapshotFormatSupportType {
 export async function fetchSnapshot(
 	snapshotUrl: string,
 	// eslint-disable-next-line @rushstack/no-new-null
-	token: string | null,
+	authHeader: string | null,
 	versionId: string,
 	fetchFullSnapshot: boolean,
 	forceAccessTokenViaAuthorizationHeader: boolean,
@@ -96,11 +96,8 @@ export async function fetchSnapshot(
 	}
 
 	const queryString = getQueryString(queryParams);
-	const { url, headers } = getUrlAndHeadersWithAuth(
-		`${snapshotUrl}${path}${queryString}`,
-		token,
-		forceAccessTokenViaAuthorizationHeader,
-	);
+	const url = `${snapshotUrl}${path}${queryString}`;
+	const headers = getHeadersWithAuth(authHeader);
 	const response = (await PerformanceEvent.timedExecAsync(
 		logger,
 		{
@@ -120,7 +117,7 @@ export async function fetchSnapshotWithRedeem(
 	logger: ITelemetryLoggerExt,
 	snapshotDownloader: (
 		finalOdspResolvedUrl: IOdspResolvedUrl,
-		storageToken: string,
+		storageTokenFetcher: InstrumentedStorageTokenFetcher,
 		snapshotOptions: ISnapshotOptions | undefined,
 		controller?: AbortController,
 	) => Promise<ISnapshotRequestAndResponseOptions>,
@@ -225,16 +222,13 @@ async function redeemSharingLink(
 			let redeemUrl: string | undefined;
 			async function callSharesAPI(baseUrl: string): Promise<void> {
 				await getWithRetryForTokenRefresh(async (tokenFetchOptions) => {
+					redeemUrl = `${baseUrl}/_api/v2.0/shares/${encodedShareUrl}`;
+					const url = redeemUrl;
 					const storageToken = await storageTokenFetcher(
-						tokenFetchOptions,
+						{ ...tokenFetchOptions, request: { url, method: "GET" } },
 						"RedeemShareLink",
 					);
-					redeemUrl = `${baseUrl}/_api/v2.0/shares/${encodedShareUrl}`;
-					const { url, headers } = getUrlAndHeadersWithAuth(
-						redeemUrl,
-						storageToken,
-						forceAccessTokenViaAuthorizationHeader,
-					);
+					const headers = getHeadersWithAuth(storageToken);
 					headers.prefer = "redeemSharingLink";
 					await fetchAndParseAsJSONHelper(url, { headers });
 				});
@@ -281,7 +275,7 @@ async function fetchLatestSnapshotCore(
 	logger: ITelemetryLoggerExt,
 	snapshotDownloader: (
 		finalOdspResolvedUrl: IOdspResolvedUrl,
-		storageToken: string,
+		storageTokenFetcher: InstrumentedStorageTokenFetcher,
 		snapshotOptions: ISnapshotOptions | undefined,
 		controller?: AbortController,
 	) => Promise<ISnapshotRequestAndResponseOptions>,
@@ -289,9 +283,6 @@ async function fetchLatestSnapshotCore(
 	enableRedeemFallback?: boolean,
 ): Promise<ISnapshotContents> {
 	return getWithRetryForTokenRefresh(async (tokenFetchOptions) => {
-		const storageToken = await storageTokenFetcher(tokenFetchOptions, "TreesLatest", true);
-		assert(storageToken !== null, 0x1e5 /* "Storage token should not be null" */);
-
 		const perfEvent = {
 			eventName: "TreesLatest",
 			attempts: tokenFetchOptions.refresh ? 2 : 1,
@@ -316,7 +307,12 @@ async function fetchLatestSnapshotCore(
 			}
 
 			const [response, fetchTime] = await measureP(async () =>
-				snapshotDownloader(odspResolvedUrl, storageToken, snapshotOptions, controller),
+				snapshotDownloader(
+					odspResolvedUrl,
+					storageTokenFetcher,
+					snapshotOptions,
+					controller,
+				),
 			).finally(() => {
 				// Clear the fetchTimeout once the response is fetched.
 				if (fetchTimeout !== undefined) {
@@ -546,13 +542,13 @@ export interface ISnapshotRequestAndResponseOptions {
 
 function getFormBodyAndHeaders(
 	odspResolvedUrl: IOdspResolvedUrl,
-	storageToken: string,
+	authHeader: string,
 	headers?: { [index: string]: string },
 ) {
 	const formBoundary = uuid();
 	const formParams: string[] = [];
 	formParams.push(`--${formBoundary}`);
-	formParams.push(`Authorization: Bearer ${storageToken}`);
+	formParams.push(`Authorization: ${authHeader}`);
 	formParams.push(`X-HTTP-Method-Override: GET`);
 
 	if (headers !== undefined) {
@@ -617,7 +613,7 @@ function countTreesInSnapshotTree(snapshotTree: ISnapshotTree): number {
  */
 export async function downloadSnapshot(
 	odspResolvedUrl: IOdspResolvedUrl,
-	storageToken: string,
+	tokenFetcher: InstrumentedStorageTokenFetcher,
 	logger: ITelemetryLoggerExt,
 	snapshotOptions: ISnapshotOptions | undefined,
 	snapshotFormatFetchType?: SnapshotFormatSupportType,
@@ -645,17 +641,23 @@ export async function downloadSnapshot(
 
 	const queryString = getQueryString(queryParams);
 	const url = `${snapshotUrl}/trees/latest${queryString}`;
+	const method = "POST";
 	// The location of file can move on Spo in which case server returns 308(Permanent Redirect) error.
 	// Adding below header will make VROOM API return 404 instead of 308 and browser can intercept it.
 	// This error thrown by server will contain the new redirect location. Look at the 404 error parsing
 	// for futher reference here: \packages\utils\odsp-doclib-utils\src\odspErrorUtils.ts
 	const header = { prefer: "manualredirect" };
-	const { body, headers } = getFormBodyAndHeaders(odspResolvedUrl, storageToken, header);
+	const authHeader = await tokenFetcher(
+		{ refresh: false, request: { url, method } },
+		"downloadSnapshot",
+	);
+	assert(authHeader !== null, 0x1e5 /* "Storage token should not be null" */);
+	const { body, headers } = getFormBodyAndHeaders(odspResolvedUrl, authHeader, header);
 	const fetchOptions = {
 		body,
 		headers,
 		signal: controller?.signal,
-		method: "POST",
+		method,
 	};
 	// Decide what snapshot format to fetch as per the feature gate.
 	switch (snapshotFormatFetchType) {

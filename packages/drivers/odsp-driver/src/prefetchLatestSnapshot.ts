@@ -15,6 +15,7 @@ import {
 	TokenFetcher,
 	IOdspUrlParts,
 	getKeyForCacheEntry,
+	type InstrumentedStorageTokenFetcher,
 } from "@fluidframework/odsp-driver-definitions";
 import { createChildLogger, PerformanceEvent } from "@fluidframework/telemetry-utils";
 import {
@@ -76,7 +77,7 @@ export async function prefetchLatestSnapshot(
 		driveId: odspResolvedUrl.driveId,
 		itemId: odspResolvedUrl.itemId,
 	};
-	const storageTokenFetcher = toInstrumentedOdspTokenFetcher(
+	const tokenFetcher = toInstrumentedOdspTokenFetcher(
 		odspLogger,
 		resolvedUrlData,
 		getStorageToken,
@@ -85,13 +86,13 @@ export async function prefetchLatestSnapshot(
 
 	const snapshotDownloader = async (
 		finalOdspResolvedUrl: IOdspResolvedUrl,
-		storageToken: string,
+		storageTokenFetcher: InstrumentedStorageTokenFetcher,
 		snapshotOptions: ISnapshotOptions | undefined,
 		controller?: AbortController,
 	) => {
 		return downloadSnapshot(
 			finalOdspResolvedUrl,
-			storageToken,
+			storageTokenFetcher,
 			odspLogger,
 			snapshotOptions,
 			undefined,
@@ -123,7 +124,7 @@ export async function prefetchLatestSnapshot(
 			);
 			await fetchSnapshotWithRedeem(
 				odspResolvedUrl,
-				storageTokenFetcher,
+				tokenFetcher,
 				hostSnapshotFetchOptions,
 				forceAccessTokenViaAuthorizationHeader,
 				odspLogger,

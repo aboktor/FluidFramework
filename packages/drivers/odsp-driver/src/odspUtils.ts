@@ -30,7 +30,7 @@ import {
 	IOdspResolvedUrl,
 	TokenFetchOptions,
 	OdspErrorType,
-	tokenFromResponse,
+	authHeaderFromResponse,
 	isTokenFromCache,
 	OdspResourceTokenFetchOptions,
 	ShareLinkTypes,
@@ -60,7 +60,10 @@ export interface IOdspResponse<T> {
 	duration: number;
 }
 
-export interface TokenFetchOptionsEx extends TokenFetchOptions {
+export interface TokenFetchOptionsEx {
+	refresh: boolean;
+	claims?: string;
+	tenantId?: string;
 	/** previous error we hit in getWithRetryForTokenRefresh */
 	previousError?: any;
 }
@@ -375,7 +378,7 @@ export function toInstrumentedOdspTokenFetcher(
 					...resolvedUrlParts,
 				}).then(
 					(tokenResponse) => {
-						const token = tokenFromResponse(tokenResponse);
+						const authHeader = authHeaderFromResponse(tokenResponse);
 						// This event alone generates so many events that is materially impacts cost of telemetry
 						// Thus do not report end event when it comes back quickly.
 						// Note that most of the hosts do not report if result is comming from cache or not,
@@ -384,10 +387,10 @@ export function toInstrumentedOdspTokenFetcher(
 						if (alwaysRecordTokenFetchTelemetry || event.duration >= 32) {
 							event.end({
 								fromCache: isTokenFromCache(tokenResponse),
-								isNull: token === null,
+								isNull: authHeader === null,
 							});
 						}
-						if (token === null && throwOnNullToken) {
+						if (authHeader === null && throwOnNullToken) {
 							throw new NonRetryableError(
 								// pre-0.58 error message: Token is null for ${name} call
 								`The Host-provided token fetcher returned null`,
@@ -395,7 +398,7 @@ export function toInstrumentedOdspTokenFetcher(
 								{ method: name, driverVersion },
 							);
 						}
-						return token;
+						return authHeader;
 					},
 					(error) => {
 						// There is an important but unofficial contract here where token providers can set canRetry: true
